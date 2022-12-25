@@ -1,5 +1,4 @@
 TOOLS_BIN=$(shell pwd)/.tools
-COVERALLS_TOKEN?=dev
 
 install:
 	go mod download
@@ -19,12 +18,8 @@ build:
 	go build -race -v ./...
 
 tests:
-	@if [ "$(COVERALLS_TOKEN)" = "dev" ]; then \
-		go test -race -v ./... ;\
-  	else \
-		go test -race -v -covermode=atomic -coverprofile=coverage.out ./... ;\
-		$(TOOLS_BIN)/goveralls -coverprofile=coverage.out -repotoken $(COVERALLS_TOKEN) ;\
-	fi
+	go test -race -v -covermode=atomic -coverprofile=coverage.out ./... ;\
+	$(TOOLS_BIN)/goveralls -coverprofile=coverage.out -repotoken $(COVERALLS_TOKEN)
 
 pre-commite: generate lint tests
 
