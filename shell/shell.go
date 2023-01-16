@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"context"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"sync"
@@ -12,24 +13,24 @@ import (
 	"github.com/deweppro/go-utils/routine"
 )
 
+const eof = byte('\n')
+
 type (
 	Shell struct {
 		env   []string
 		dir   string
 		shell string
 		mux   sync.RWMutex
-		w     Writer
+		w     io.Writer
 	}
-
-	Writer func(s string)
 )
 
-func New(w Writer) *Shell {
+func New() *Shell {
 	return &Shell{
 		env:   make([]string, 0),
 		dir:   os.TempDir(),
 		shell: "/bin/sh",
-		w:     w,
+		w:     &NullWriter{},
 	}
 }
 
@@ -54,6 +55,21 @@ func (v *Shell) SetShell(shell string) {
 	v.shell = shell
 }
 
+func (v *Shell) SetWriter(w io.Writer) {
+	v.mux.Lock()
+	defer v.mux.Unlock()
+
+	v.w = w
+}
+
+func (v *Shell) writeBytes(b []byte) {
+	v.w.Write(append(b, eof)) //nolint: errcheck
+}
+
+func (v *Shell) writeString(b string) {
+	v.w.Write(append([]byte(b), eof)) //nolint: errcheck
+}
+
 func (v *Shell) CallPackageContext(ctx context.Context, commands ...string) error {
 	for i, command := range commands {
 		if err := v.CallContext(ctx, command); err != nil {
@@ -67,6 +83,7 @@ func (v *Shell) CallParallelContext(ctx context.Context, commands ...string) err
 	var err error
 	calls := make([]func(), 0, len(commands))
 	for i, command := range commands {
+		command := command
 		calls = append(calls, func() {
 			if e := v.CallContext(ctx, command); e != nil {
 				err = errors.Wrap(err, errors.WrapMessage(err, "call command #%d [%s]", i, command))
@@ -81,11 +98,11 @@ func (v *Shell) CallParallelContext(ctx context.Context, commands ...string) err
 }
 
 func (v *Shell) CallContext(ctx context.Context, command string) error {
-	v.w(command)
+	v.writeString(command)
 
 	v.mux.RLock()
 	cmd := exec.CommandContext(ctx, v.shell, "-xec", fmt.Sprintln(command, " <&-"))
-	cmd.Env = append(v.env, os.Environ()...)
+	cmd.Env = append(os.Environ(), v.env...)
 	cmd.Dir = v.dir
 	v.mux.RUnlock()
 
@@ -108,7 +125,7 @@ func (v *Shell) CallContext(ctx context.Context, command string) error {
 	go func() {
 		scanner := bufio.NewScanner(stdout)
 		for scanner.Scan() {
-			v.w(scanner.Text())
+			v.writeBytes(scanner.Bytes())
 			select {
 			case <-ctx.Done():
 				break
@@ -120,7 +137,7 @@ func (v *Shell) CallContext(ctx context.Context, command string) error {
 	go func() {
 		scanner := bufio.NewScanner(stderr)
 		for scanner.Scan() {
-			v.w(scanner.Text())
+			v.writeBytes(scanner.Bytes())
 			select {
 			case <-ctx.Done():
 				break
@@ -130,4 +147,23 @@ func (v *Shell) CallContext(ctx context.Context, command string) error {
 	}()
 
 	return cmd.Wait()
+}
+
+func (v *Shell) Call(ctx context.Context, command string) ([]byte, error) {
+	v.mux.RLock()
+	cmd := exec.CommandContext(ctx, v.shell, "-xec", fmt.Sprintln(command, " <&-"))
+	cmd.Env = append(os.Environ(), v.env...)
+	cmd.Dir = v.dir
+	v.mux.RUnlock()
+
+	return cmd.CombinedOutput()
+}
+
+////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
+
+type NullWriter struct {
+}
+
+func (v *NullWriter) Write(_ []byte) (int, error) {
+	return 0, nil
 }
