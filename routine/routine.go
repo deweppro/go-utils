@@ -43,10 +43,11 @@ func Parallel(calls ...func()) {
 	wg := sync.WaitGroup{}
 	wg.Add(len(calls))
 	for _, call := range calls {
-		go func(c func()) {
-			c()
+		call := call
+		go func() {
+			call()
 			wg.Done()
-		}(call)
+		}()
 	}
 	wg.Wait()
 }
