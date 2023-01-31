@@ -40,10 +40,10 @@ func Retry(count int, ttl time.Duration, call func() error) error {
 }
 
 func Parallel(calls ...func()) {
-	wg := sync.WaitGroup{}
-	wg.Add(len(calls))
+	var wg sync.WaitGroup
 	for _, call := range calls {
 		call := call
+		wg.Add(1)
 		go func() {
 			call()
 			wg.Done()

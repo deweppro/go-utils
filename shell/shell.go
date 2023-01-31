@@ -1,7 +1,6 @@
 package shell
 
 import (
-	"bufio"
 	"context"
 	"fmt"
 	"io"
@@ -9,68 +8,102 @@ import (
 	"os/exec"
 	"sync"
 
-	errors "github.com/deweppro/go-errors"
+	"github.com/deweppro/go-errors"
 	"github.com/deweppro/go-utils/routine"
 )
 
-const eof = byte('\n')
-
 type (
-	Shell struct {
+	sh struct {
 		env   []string
 		dir   string
 		shell string
 		mux   sync.RWMutex
 		w     io.Writer
+		ch    chan []byte
+	}
+
+	Shell interface {
+		Close()
+		SetEnv(key, value string)
+		SetDir(dir string)
+		SetShell(shell string)
+		SetWriter(w io.Writer)
+		CallPackageContext(ctx context.Context, commands ...string) error
+		CallParallelContext(ctx context.Context, commands ...string) error
+		CallContext(ctx context.Context, command string) error
+		Call(ctx context.Context, command string) ([]byte, error)
 	}
 )
 
-func New() *Shell {
-	return &Shell{
+func New() Shell {
+	v := &sh{
 		env:   make([]string, 0),
 		dir:   os.TempDir(),
 		shell: "/bin/sh",
 		w:     &NullWriter{},
+		ch:    make(chan []byte, 128),
 	}
+	go v.Pipe()
+	return v
 }
 
-func (v *Shell) SetEnv(key, value string) {
+func (v *sh) SetEnv(key, value string) {
 	v.mux.Lock()
 	defer v.mux.Unlock()
 
 	v.env = append(v.env, key+"="+value)
 }
 
-func (v *Shell) SetDir(dir string) {
+func (v *sh) SetDir(dir string) {
 	v.mux.Lock()
 	defer v.mux.Unlock()
 
 	v.dir = dir
 }
 
-func (v *Shell) SetShell(shell string) {
+func (v *sh) SetShell(shell string) {
 	v.mux.Lock()
 	defer v.mux.Unlock()
 
 	v.shell = shell
 }
 
-func (v *Shell) SetWriter(w io.Writer) {
+func (v *sh) SetWriter(w io.Writer) {
 	v.mux.Lock()
 	defer v.mux.Unlock()
 
 	v.w = w
 }
 
-func (v *Shell) writeBytes(b []byte) {
-	v.w.Write(append(b, eof)) //nolint: errcheck
+func (v *sh) Close() {
+	v.SetWriter(&NullWriter{})
+	close(v.ch)
 }
 
-func (v *Shell) writeString(b string) {
-	v.w.Write(append([]byte(b), eof)) //nolint: errcheck
+func (v *sh) Pipe() {
+	for {
+		b, ok := <-v.ch
+		if !ok {
+			return
+		}
+		v.mux.RLock()
+		var bb []byte
+		copy(bb, b)
+		v.w.Write(bb) //nolint:errcheck
+		v.mux.RUnlock()
+	}
 }
 
-func (v *Shell) CallPackageContext(ctx context.Context, commands ...string) error {
+func (v *sh) Write(b []byte) (n int, err error) {
+	l := len(b)
+	select {
+	case v.ch <- b:
+	default:
+	}
+	return l, nil
+}
+
+func (v *sh) CallPackageContext(ctx context.Context, commands ...string) error {
 	for i, command := range commands {
 		if err := v.CallContext(ctx, command); err != nil {
 			return errors.WrapMessage(err, "call command #%d [%s]", i, command)
@@ -79,14 +112,19 @@ func (v *Shell) CallPackageContext(ctx context.Context, commands ...string) erro
 	return nil
 }
 
-func (v *Shell) CallParallelContext(ctx context.Context, commands ...string) error {
-	var err error
+func (v *sh) CallParallelContext(ctx context.Context, commands ...string) error {
+	var (
+		err error
+		mux sync.Mutex
+	)
 	calls := make([]func(), 0, len(commands))
-	for i, command := range commands {
-		command := command
+	for i, c := range commands {
+		c := c
 		calls = append(calls, func() {
-			if e := v.CallContext(ctx, command); e != nil {
-				err = errors.Wrap(err, errors.WrapMessage(err, "call command #%d [%s]", i, command))
+			if e := v.CallContext(ctx, c); e != nil {
+				mux.Lock()
+				err = errors.Wrap(err, errors.WrapMessage(err, "call command #%d [%s]", i, c))
+				mux.Unlock()
 			}
 		})
 	}
@@ -97,61 +135,26 @@ func (v *Shell) CallParallelContext(ctx context.Context, commands ...string) err
 	return nil
 }
 
-func (v *Shell) CallContext(ctx context.Context, command string) error {
-	v.writeString(command)
-
+func (v *sh) CallContext(ctx context.Context, c string) error {
 	v.mux.RLock()
-	cmd := exec.CommandContext(ctx, v.shell, "-xec", fmt.Sprintln(command, " <&-"))
+	if _, err := fmt.Fprintf(v, c+"\n"); err != nil {
+		v.mux.RUnlock()
+		return err
+	}
+
+	cmd := exec.CommandContext(ctx, v.shell, "-xec", c, " <&-")
 	cmd.Env = append(os.Environ(), v.env...)
 	cmd.Dir = v.dir
+	cmd.Stdout = v
+	cmd.Stderr = v
 	v.mux.RUnlock()
 
-	stdout, err := cmd.StdoutPipe()
-	if err != nil {
-		return errors.WrapMessage(err, "stdout init")
-	}
-	defer stdout.Close() //nolint: errcheck
-
-	stderr, err := cmd.StderrPipe()
-	if err != nil {
-		return errors.WrapMessage(err, "stderr init")
-	}
-	defer stderr.Close() //nolint: errcheck
-
-	if err = cmd.Start(); err != nil {
-		return errors.WrapMessage(err, "start command")
-	}
-
-	go func() {
-		scanner := bufio.NewScanner(stdout)
-		for scanner.Scan() {
-			v.writeBytes(scanner.Bytes())
-			select {
-			case <-ctx.Done():
-				break
-			default:
-			}
-		}
-	}()
-
-	go func() {
-		scanner := bufio.NewScanner(stderr)
-		for scanner.Scan() {
-			v.writeBytes(scanner.Bytes())
-			select {
-			case <-ctx.Done():
-				break
-			default:
-			}
-		}
-	}()
-
-	return cmd.Wait()
+	return cmd.Run()
 }
 
-func (v *Shell) Call(ctx context.Context, command string) ([]byte, error) {
+func (v *sh) Call(ctx context.Context, c string) ([]byte, error) {
 	v.mux.RLock()
-	cmd := exec.CommandContext(ctx, v.shell, "-xec", fmt.Sprintln(command, " <&-"))
+	cmd := exec.CommandContext(ctx, v.shell, "-xec", c, " <&-")
 	cmd.Env = append(os.Environ(), v.env...)
 	cmd.Dir = v.dir
 	v.mux.RUnlock()
@@ -164,6 +167,6 @@ func (v *Shell) Call(ctx context.Context, command string) ([]byte, error) {
 type NullWriter struct {
 }
 
-func (v *NullWriter) Write(_ []byte) (int, error) {
-	return 0, nil
+func (v *NullWriter) Write(b []byte) (int, error) {
+	return len(b), nil
 }

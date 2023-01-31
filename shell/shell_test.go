@@ -14,7 +14,7 @@ func TestUnit_ShellCall(t *testing.T) {
 	sh.SetDir("/tmp")
 	sh.SetEnv("LANG", "en_US.UTF-8")
 
-	out, err := sh.Call(context.TODO(), "ping -c 2 google.ru")
+	out, err := sh.Call(context.TODO(), "ls -la /tmp")
 	if err != nil {
 		t.Fatalf(err.Error())
 	}
@@ -22,16 +22,17 @@ func TestUnit_ShellCall(t *testing.T) {
 }
 
 func TestUnit_ShellCallParallelContext(t *testing.T) {
-	out := &bytes.Buffer{}
+	var out bytes.Buffer
 
 	sh := shell.New()
 	sh.SetDir("/tmp")
 	sh.SetEnv("LANG", "en_US.UTF-8")
-	sh.SetWriter(out)
-	err := sh.CallParallelContext(context.TODO(), "ping -c 2 google.ru", "ping -c 2 yandex.ru", "ls -la")
+	sh.SetWriter(&out)
+	err := sh.CallParallelContext(context.TODO(), "ls -la /tmp", "ls -la /", "ls -la")
 	if err != nil {
 		t.Fatalf(err.Error())
 	}
+	sh.Close()
 
 	fmt.Println(out.String())
 }
