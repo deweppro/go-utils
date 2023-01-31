@@ -1,7 +1,7 @@
 
 .PHONY: install
 install:
-	go install github.com/dewep-online/devtool
+	go install github.com/dewep-online/devtool@latest
 
 .PHONY: setup
 setup:
